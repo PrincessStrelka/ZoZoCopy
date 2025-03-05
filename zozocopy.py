@@ -29,7 +29,9 @@ parser = argparse.ArgumentParser(prog='ZoZoCopy', description='Copies data from 
 parser.add_argument('dev_path')
 parser.add_argument('src_folder')
 parser.add_argument('dst_folder')
+parser.add_argument('should_print')
 args = parser.parse_args()
+should_print = args.should_print.lower() in ['true', '1', 't', 'y', 'yes', 'yeah', 'yup', 'certainly', 'uh-huh']
 src_folder = os.path.join(args.src_folder, '')
 dst_name = datetime.datetime.now().strftime(f"_%Y-%m-%d_%H.%M.%S")
 dst_folder = os.path.join(args.dst_folder, '') + args.src_folder.split(os.sep)[-1] + dst_name + os.sep
@@ -39,9 +41,11 @@ myfile = open("failed.txt", "a")
 myfile.write(f" ---- {dst_folder} ---- \n")
 
 #make sure the destination folder exists
+print("Set up destination folder")
 os.system(f"cp '{src_folder}' '{dst_folder}' -p -r --sparse=always -a")  
 
 #set up the list of files to copy and their destination
+print("Create files to copy list")
 filesToCopy = []
 for root, dirs, files in os.walk(src_folder):    
     filesToCopy.append([root, root.replace(src_folder, dst_folder)])
@@ -50,13 +54,13 @@ for root, dirs, files in os.walk(src_folder):
         filesToCopy.append([sourceFilePath, sourceFilePath.replace(src_folder, dst_folder)])
 
 #itterate through all the files we need to copy
+start_time = time.time()
 totalFileCount = len(filesToCopy)
 while len(filesToCopy)>0:
     for f in filesToCopy:
-        print(f'[{totalFileCount-len(filesToCopy) + 1}/{totalFileCount}] \033[34m{f[0]}\033[0m to \033[35m{f[0]}\033[0m')
         copydatsource = f[0]
-        copydatdest = f[1]
-        
+        copydatdest = f[1]                
+                
         #get the stat of source file
         sourceStat = str(subprocess.run(["stat", f"{copydatsource}"], capture_output=True, text=True).stdout)        
         
@@ -91,7 +95,9 @@ while len(filesToCopy)>0:
             subprocess.run(["debugfs", "-w", "-R", f'set_inode_field <{os.stat(copydatdest).st_ino}> {field}_extra {hex(extra_field)}', args.dev_path], capture_output=True)    
             
         #refresh the caches
-        os.system('sudo sync && sudo sysctl -w vm.drop_caches=3')
+        #os.system('sudo sync && sudo sysctl -w vm.drop_caches=3')
+        subprocess.run(["sync"], capture_output=True)
+        subprocess.run(["sysctl", "-w", "vm.drop_caches=3"], capture_output=True)
     
         #get the stat of copied file
         destStat = str(subprocess.run(["stat", f"{copydatdest}"], capture_output=True, text=True).stdout)        
@@ -105,17 +111,28 @@ while len(filesToCopy)>0:
             fieldNs = (int(datetime.datetime.strptime(fieldDateList[0], "%Y-%m-%d %H:%M:%S").timestamp())*10**9) + int(fieldDateList[1]) if len(fieldDateList)>1 else None
             correctNs = timesList[j][1] if not timesList[j][1] == None else fallthroughTime
             timesMatch = fieldNs == correctNs
-            print(f'{t[1].rjust(6)}: \033[32m{correctNs}\033[0m, \033[{32 if timesMatch else 31}m{fieldNs}\033[0m')
+            if should_print:
+                print(f'{t[1].replace("time", "")}: \033[32m{correctNs}\033[0m \033[{32 if timesMatch else 31}m{fieldNs}\033[0m ', end="")
             if not timesMatch : retry = True
             j+=1
-        
+        if should_print:
+            print()
+
         #if the times dont match, print the stats and move to the end of the list, else, remove this file from the ones to process
+        filesToCopy.remove(f)
+        destcol = 32
         if retry:
-            print(f'\033[34m{sourceStat}\033[0m')
-            print(f'\033[35m{destStat}\033[0m')
-            filesToCopy.remove(f)
+            if should_print:
+                print(f'\033[34m{sourceStat}\033[0m')
+                print(f'\033[35m{destStat}\033[0m')
+            destcol = 31
             filesToCopy.append(f)
-        else:
-            filesToCopy.remove(f)
+            totalFileCount+=1        
+        print(f'[{totalFileCount-len(filesToCopy)+1}/{totalFileCount}] [Runtime: {round((time.time() - start_time), 4)}s] \033[34m{copydatsource.replace(os.sep.join(src_folder.split(os.sep)[:-2]), "")}\033[0m to \033[{destcol}m{copydatdest.replace(args.dst_folder,"")}\033[0m')        
+            
+        if should_print:
+            print()
+
 
 myfile.close()
+print(f' --- Completed {totalFileCount} Files in {(time.time() - start_time)} Seconds. {(time.time() - start_time)/totalFileCount} per file speed ---')
