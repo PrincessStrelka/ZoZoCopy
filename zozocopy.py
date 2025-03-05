@@ -34,40 +34,88 @@ src_folder = os.path.join(args.src_folder, '')
 dst_name = datetime.datetime.now().strftime(f"_%Y-%m-%d_%H.%M.%S")
 dst_folder = os.path.join(args.dst_folder, '') + args.src_folder.split(os.sep)[-1] + dst_name + os.sep
 
+#ensure the failed.txt exists
+myfile = open("failed.txt", "a")
+myfile.write(f" ---- {dst_folder} ---- \n")
+
 #make sure the destination folder exists
 os.system(f"cp '{src_folder}' '{dst_folder}' -p -r --sparse=always -a")  
 
-#recursively itterate over the source folder
-def copyData(copydatsource, copydatdest):
-    print(f'---- copy data from \033[34m{copydatsource}\033[0m to \033[35m{copydatdest}\033[0m ----')
-    
-    #get source stats
-    timesList = [x[:-28].split(":") for x in list(filter(lambda x: 'time' in x, subprocess.run(["debugfs", "-R", f'stat <{os.stat(copydatsource).st_ino}>', args.dev_path], capture_output=True, text=True).stdout.split("\n")))]
-    
-    #copy over the inode fields
-    for time in timesList:
-        #copy the change (ctime), access (atime), modify (mtime), birth time (crtime)
-        subprocess.run(["debugfs", "-w", "-R", f'set_inode_field <{os.stat(copydatdest).st_ino}> {time[0].strip()} @{time[1].strip()}', args.dev_path], capture_output=True)
-        subprocess.run(["debugfs", "-w", "-R", f'set_inode_field <{os.stat(copydatdest).st_ino}> {time[0].strip()}_extra 0x{time[2].strip()}', args.dev_path], capture_output=True)    
-        
-    
-    #get dest stats
-    destTimesList = [x[:-28].split(":") for x in list(filter(lambda x: 'time' in x, subprocess.run(["debugfs", "-R", f'stat <{os.stat(copydatdest).st_ino}>', args.dev_path], capture_output=True, text=True).stdout.split("\n")))]
-    print(f'\033[34m{timesList}\033[0m')
-    if timesList == destTimesList:
-        print(f'\033[32m{destTimesList}\033[0m')
-    else:
-        #deststattext = subprocess.run(["debugfs", "-R", f'stat <{os.stat(copydatdest).st_ino}>', args.dev_path], capture_output=True, text=True)
-        #print(f'\033[32m{deststattext}\033[0m')
-        os.system('sudo sync && sudo sysctl -w vm.drop_caches=3')
-        print(f'\033[34m{str(subprocess.run(["stat", f"{copydatsource}"], capture_output=True, text=True).stdout)}\033[0m')
-        print(f'\033[35m{str(subprocess.run(["stat", f"{copydatdest}"], capture_output=True, text=True).stdout)}\033[0m')
-        print(f'\033[31mTRY AGAIN\033[0m')
-    
-
+#set up the list of files to copy and their destination
+filesToCopy = []
 for root, dirs, files in os.walk(src_folder):    
-    #print(f'\033[4;1;34m{root}\033[0m')
-    copyData(root, root.replace(src_folder, dst_folder))
+    filesToCopy.append([root, root.replace(src_folder, dst_folder)])
     for file in files:
         sourceFilePath = os.path.join(root, '') + file
-        copyData(sourceFilePath, sourceFilePath.replace(src_folder, dst_folder))
+        filesToCopy.append([sourceFilePath, sourceFilePath.replace(src_folder, dst_folder)])
+
+#itterate through all the files we need to copy
+totalFileCount = len(filesToCopy)
+while len(filesToCopy)>0:
+    for f in filesToCopy:
+        print(f'[{totalFileCount-len(filesToCopy) + 1}/{totalFileCount}] \033[34m{f[0]}\033[0m to \033[35m{f[0]}\033[0m')
+        copydatsource = f[0]
+        copydatdest = f[1]
+        
+        #get the stat of source file
+        sourceStat = str(subprocess.run(["stat", f"{copydatsource}"], capture_output=True, text=True).stdout)        
+        
+        #get times of source file into a list
+        timesList = []
+        for t in [["Access", "atime"], ["Modify", "mtime"], ['Change', "ctime"], ['Birth', "crtime"]]:
+            fieldString = list(filter(lambda x: t[0] in x, sourceStat.split("\n")))[-1]
+            fieldDateList = fieldString[8:-6].split(".")
+            fieldNs = (int(datetime.datetime.strptime(fieldDateList[0], "%Y-%m-%d %H:%M:%S").timestamp())*10**9) + int(fieldDateList[1]) if len(fieldDateList)>1 else None
+            timesList.append([t[1], fieldNs])
+        
+        #convert times into inode field times
+        fallthroughTime = min([num[1] for num in timesList if isinstance(num[1], (int,float))])            
+        for t in timesList:            
+            field = t[0]
+            timeNs = t[1] if not t[1] == None else fallthroughTime
+            #print(f'{field.rjust(6)}: {timeNs}')
+            
+            #get the nanoseconds
+            nanosec = int(timeNs % 1000000000)
+            nanosec = (nanosec & 0x3fffffff) << 2
+            
+            #get the epoch
+            epoch = int(timeNs // 1e9)
+            adjusted = epoch + 2147483648
+            time_lowbits=(( (adjusted % 4294967296) - 2147483648 ))
+            time_highbits= int(adjusted / 4294967296)
+
+            #create the extra feild
+            extra_field= int(nanosec + time_highbits)
+            subprocess.run(["debugfs", "-w", "-R", f'set_inode_field <{os.stat(copydatdest).st_ino}> {field} @{hex(time_lowbits)}', args.dev_path], capture_output=True)
+            subprocess.run(["debugfs", "-w", "-R", f'set_inode_field <{os.stat(copydatdest).st_ino}> {field}_extra {hex(extra_field)}', args.dev_path], capture_output=True)    
+            
+        #refresh the caches
+        os.system('sudo sync && sudo sysctl -w vm.drop_caches=3')
+    
+        #get the stat of copied file
+        destStat = str(subprocess.run(["stat", f"{copydatdest}"], capture_output=True, text=True).stdout)        
+
+        #verify that the times have been correctly coppied
+        j=0
+        retry = False
+        for t in [["Access", "atime"], ["Modify", "mtime"], ['Change', "ctime"], ['Birth', "crtime"]]:
+            fieldString = list(filter(lambda x: t[0] in x, destStat.split("\n")))[-1]
+            fieldDateList = fieldString[8:-6].split(".")
+            fieldNs = (int(datetime.datetime.strptime(fieldDateList[0], "%Y-%m-%d %H:%M:%S").timestamp())*10**9) + int(fieldDateList[1]) if len(fieldDateList)>1 else None
+            correctNs = timesList[j][1] if not timesList[j][1] == None else fallthroughTime
+            timesMatch = fieldNs == correctNs
+            print(f'{t[1].rjust(6)}: \033[32m{correctNs}\033[0m, \033[{32 if timesMatch else 31}m{fieldNs}\033[0m')
+            if not timesMatch : retry = True
+            j+=1
+        
+        #if the times dont match, print the stats and move to the end of the list, else, remove this file from the ones to process
+        if retry:
+            print(f'\033[34m{sourceStat}\033[0m')
+            print(f'\033[35m{destStat}\033[0m')
+            filesToCopy.remove(f)
+            filesToCopy.append(f)
+        else:
+            filesToCopy.remove(f)
+
+myfile.close()
