@@ -54,6 +54,7 @@ for root, dirs, files in os.walk(src_folder):
         filesToCopy.append([sourceFilePath, sourceFilePath.replace(src_folder, dst_folder)])
 
 #itterate through all the files we need to copy
+approxTimePerFile = 0.746416178
 start_time = time.time()
 totalFileCount = len(filesToCopy)
 while len(filesToCopy)>0:
@@ -128,7 +129,10 @@ while len(filesToCopy)>0:
             destcol = 31
             filesToCopy.append(f)
             totalFileCount+=1        
-        print(f'[{totalFileCount-len(filesToCopy)+1}/{totalFileCount}] [Runtime: {round((time.time() - start_time), 4)}s] \033[34m{copydatsource.replace(os.sep.join(src_folder.split(os.sep)[:-2]), "")}\033[0m to \033[{destcol}m{copydatdest.replace(args.dst_folder,"")}\033[0m')        
+        runtime = time.time() - start_time
+        filesDone = totalFileCount-len(filesToCopy)
+        approxTimePerFile = runtime/filesDone
+        print(f'[{filesDone}/{totalFileCount}] [~ {round(approxTimePerFile*totalFileCount - runtime, 4)}s remaining] \033[34m{copydatsource.replace(os.sep.join(src_folder.split(os.sep)[:-2]), "")}\033[0m to \033[{destcol}m{copydatdest.replace(args.dst_folder,"")}\033[0m')        
             
         if should_print:
             print()
